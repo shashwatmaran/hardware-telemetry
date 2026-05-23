@@ -1,0 +1,142 @@
+{
+  "topology": {
+    "description": "Global hierarchical topology: Cities -> Regions -> Continents -> Global",
+    "regions": [
+      {
+        "name": "south_india",
+        "country": "India",
+        "continent": "Asia",
+        "send_to_port": 10101,
+        "cities": [
+          {
+            "name": "Bangalore",
+            "latitude": 12.9716,
+            "longitude": 77.5946
+          },
+          {
+            "name": "Hyderabad",
+            "latitude": 17.3850,
+            "longitude": 78.4867
+          }
+        ]
+      },
+      {
+        "name": "north_india",
+        "country": "India",
+        "continent": "Asia",
+        "send_to_port": 10101,
+        "cities": [
+          {
+            "name": "Delhi",
+            "latitude": 28.7041,
+            "longitude": 77.1025
+          },
+          {
+            "name": "Mumbai",
+            "latitude": 19.0760,
+            "longitude": 72.8777
+          }
+        ]
+      },
+      {
+        "name": "europe",
+        "country": "Europe",
+        "continent": "Europe",
+        "send_to_port": 10102,
+        "cities": [
+          {
+            "name": "Paris",
+            "latitude": 48.8566,
+            "longitude": 2.3522
+          },
+          {
+            "name": "London",
+            "latitude": 51.5074,
+            "longitude": -0.1278
+          }
+        ]
+      },
+      {
+        "name": "americas",
+        "country": "USA",
+        "continent": "Americas",
+        "send_to_port": 10103,
+        "cities": [
+          {
+            "name": "New York",
+            "latitude": 40.7128,
+            "longitude": -74.0060
+          },
+          {
+            "name": "Los Angeles",
+            "latitude": 34.0522,
+            "longitude": -118.2437
+          }
+        ]
+      }
+    ],
+    "hierarchy": {
+      "collectors_output_topic": "{region}_events",
+      "regional_aggregators": [
+        {
+          "name": "asia_regional",
+          "consumes_from": ["south_india_events", "north_india_events"],
+          "publishes_to": "asia_regional_events",
+          "listen_port": 10101,
+          "forward_to_port": 11101,
+          "tier": "regional"
+        },
+        {
+          "name": "europe_regional",
+          "consumes_from": ["europe_events"],
+          "publishes_to": "europe_regional_events",
+          "listen_port": 10102,
+          "forward_to_port": 11102,
+          "tier": "regional"
+        },
+        {
+          "name": "americas_regional",
+          "consumes_from": ["americas_events"],
+          "publishes_to": "americas_regional_events",
+          "listen_port": 10103,
+          "forward_to_port": 11103,
+          "tier": "regional"
+        }
+      ],
+      "continent_aggregators": [
+        {
+          "name": "asia_continent",
+          "consumes_from": ["asia_regional_events"],
+          "publishes_to": "asia_continent_events",
+          "listen_port": 11101,
+          "forward_to_port": 12101,
+          "tier": "continent"
+        },
+        {
+          "name": "europe_continent",
+          "consumes_from": ["europe_regional_events"],
+          "publishes_to": "europe_continent_events",
+          "listen_port": 11102,
+          "forward_to_port": 12101,
+          "tier": "continent"
+        },
+        {
+          "name": "americas_continent",
+          "consumes_from": ["americas_regional_events"],
+          "publishes_to": "americas_continent_events",
+          "listen_port": 11103,
+          "forward_to_port": 12101,
+          "tier": "continent"
+        }
+      ],
+      "global_aggregator": {
+        "name": "global_sink",
+        "consumes_from": ["asia_continent_events", "europe_continent_events", "americas_continent_events"],
+        "publishes_to": "global_events",
+        "listen_port": 12101,
+        "forward_to_port": 13101,
+        "tier": "global"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "continent": "Asia",
+  "country": "India",
+  "region": "South India",
+
+  "cities": [
+    {
+      "name": "Chennai",
+      "lat": 13.0827,
+      "lon": 80.2707
+    },
+    {
+      "name": "Bangalore",
+      "lat": 12.9716,
+      "lon": 77.5946
+    },
+    {
+      "name": "Hyderabad",
+      "lat": 17.3850,
+      "lon": 78.4867
+    }
+  ]
+}

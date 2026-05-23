@@ -1,0 +1,41 @@
+# Log files
+*.log
+logs/
+*.log.*
+
+# Build and CMake
+build/
+cmake_build/
+CMakeCache.txt
+CMakeFiles/
+CMakeLists.txt.user
+*.cmake
+
+# Compiled objects and binaries
+*.o
+*.a
+*.so
+*.out
+*.exe
+*.dll
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.cproject
+.settings/
+
+# Dependencies
+node_modules/
+vendor/
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
