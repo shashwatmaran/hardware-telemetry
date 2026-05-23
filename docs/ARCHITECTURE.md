@@ -1,6 +1,6 @@
-# Architecture & Design Overview
+# Hardware Telemetry Architecture
 
-This document explains how Weather RTOS actually runs: how messages move through the hierarchy, where concurrency exists, which mutexes protect which state, and why the Timescale schema is split into raw and aggregate tables.
+This document explains how the hardware telemetry pipeline runs: how messages move through the hierarchy, where concurrency exists, which mutexes protect which state, and why the Timescale schema is split into raw and aggregate tables.
 
 ## System Shape
 
@@ -8,7 +8,7 @@ The repository is organized around a pipeline:
 
 Collectors -> hierarchical aggregators -> Timescale writer
 
-The default demo launches one OS process per component instance. Inside each process, the code keeps concurrency narrow and explicit: a few dedicated threads handle polling, socket I/O, queue draining, and batching instead of a large shared worker pool.
+The default demo launches one OS process per component instance. Inside each process, the code keeps concurrency narrow and explicit: a few dedicated threads handle sample generation, socket I/O, queue draining, and batching instead of a large shared worker pool.
 
 The main entry points are:
 
@@ -22,8 +22,8 @@ Shared support lives under [common/](common/), especially [common/pipeline/Valid
 
 The normal data path is:
 
-1. A collector samples weather data for a city.
-2. The collector wraps that payload in a MessageEnvelope and publishes it to the region topic.
+1. A collector synthesizes hardware telemetry for a node.
+2. The collector wraps that sample in a MessageEnvelope and publishes it to the regional topic.
 3. The regional or hierarchical aggregator receives the envelope, validates it, and forwards it upward.
 4. The writer receives the envelope, batches it, and writes both a raw record and a minute-level aggregate into TimescaleDB.
 
@@ -34,20 +34,20 @@ Two details matter here:
 
 ## Why There Are Two Timescale Tables
 
-The schema in [timescale/schema.sql](timescale/schema.sql) uses both:
+The schema in [timescale/hardware_schema.sql](timescale/hardware_schema.sql) uses both:
 
-- [weather_observations_raw](timescale/schema.sql#L3) for full-fidelity event history
-- [weather_city_minute_aggregates](timescale/schema.sql#L24) for minute-bucket rollups
+- `hardware_telemetry_raw` for full-fidelity sample history
+- `node_minute_aggregates` for minute-bucket rollups
 
 That split is deliberate.
 
-`weather_observations_raw` is the source of truth. It stores every observation with its exact event time, ingestion time, source, location fields, temperature, humidity, wind speed, and full payload JSON. It is indexed by `message_id` for deduplication and turned into a hypertable on `event_time` so time-range reads stay efficient.
+`hardware_telemetry_raw` is the source of truth. It stores every sample with its exact event time, ingestion time, source, node identity, site and region metadata, metrics, and the full payload JSON. It is indexed by `message_id` for deduplication and turned into a hypertable on `event_time` so time-range reads stay efficient.
 
-`weather_city_minute_aggregates` is a read-optimized summary table. It keeps one row per minute bucket and location. That makes dashboard-style queries and per-city rollups much cheaper than scanning raw data every time.
+`node_minute_aggregates` is a read-optimized summary table. It keeps one row per minute bucket and node. That makes dashboard-style queries and node health rollups much cheaper than scanning raw data every time.
 
 The writer inserts into both tables in the same batch transaction. You can see that in [common/timescale/TimescaleBatchWriter.hpp](common/timescale/TimescaleBatchWriter.hpp). The raw insert preserves history; the aggregate insert gives fast access to minute-level statistics.
 
-Important nuance: as currently implemented, the aggregate upsert merges `min_temperature` and `max_temperature`, but `avg_temperature`, `avg_humidity`, `avg_wind_speed`, and `observation_count` are written from the latest batch contribution for that bucket. That is fine if the table is treated as a per-batch rollup cache, but it is not a full running aggregate model.
+Important nuance: as currently implemented, the aggregate upsert merges `min_cpu_temp_c` and `max_cpu_temp_c`, but the remaining averages are written from the latest batch contribution for that bucket. That is fine if the table is treated as a per-batch rollup cache, but it is not a full running aggregate model.
 
 ## Component Roles
 
@@ -55,10 +55,10 @@ Important nuance: as currently implemented, the aggregate upsert merges `min_tem
 
 The regional collector in [collectors/regional/main.cpp](collectors/regional/main.cpp) has two kinds of threads:
 
-- One polling thread per city
+- One sample-generation thread per node
 - One sender thread that drains the queue and publishes envelopes
 
-Each poll thread fetches weather data, builds a WeatherPacket, and pushes it into a shared `std::queue` guarded by `queueMutex` and coordinated with `queueCv`.
+Each sample thread synthesizes telemetry, builds a `TelemetryPacket`, and pushes it into a shared `std::queue` guarded by `queueMutex` and coordinated with `queueCv`.
 
 The sender thread also uses `queueMutex` and `queueCv` to pop packets, convert them into MessageEnvelope objects, and publish them to the next hop.
 
@@ -80,7 +80,7 @@ This keeps blocking socket reads away from the main accept loop and avoids coupl
 
 The consumer pipeline in [common/pipeline/ValidationAggregationConsumerPipeline.hpp](common/pipeline/ValidationAggregationConsumerPipeline.hpp) does four things in order:
 
-1. Deserialize the envelope into a WeatherPacket.
+1. Deserialize the envelope into a TelemetryPacket.
 2. Validate required fields and ranges.
 3. Record local statistics.
 4. Log the envelope and call the downstream success callback.
@@ -88,8 +88,8 @@ The consumer pipeline in [common/pipeline/ValidationAggregationConsumerPipeline.
 The mutex in this class protects its counters and aggregates:
 
 - `totalPackets_`
-- `packetsByCity_`
-- `temperatureSum_`
+- `packetsBySource_`
+- `cpuTempSum_`
 
 The lock is held only around the bookkeeping updates and summary calculation, not around file I/O or downstream callbacks. That keeps the critical section small.
 
@@ -141,7 +141,7 @@ This is used in the collector, aggregator, and writer entry points. The result i
 The design tries to isolate blocking work:
 
 - Network reads happen on socket-specific threads.
-- Weather polling happens on per-city threads.
+- Telemetry generation happens on per-node threads.
 - Database writes happen in batches.
 - Logging is append-only and intentionally simple.
 
@@ -181,14 +181,14 @@ Run the demo from the repository root:
 Useful environment variables:
 
 - `TIMESCALEDB_DSN` controls the Timescale connection string.
-- `WEATHER_RTOS_HOST` controls the TCP host used by some components.
+- `HARDWARE_TELEMETRY_HOST` controls the TCP host used by some components.
 - `LOGDIR` overrides the log directory.
 
 ## Common Modules
 
 The `common/` tree is the shared runtime and transport layer for the whole repo. The architecture doc now covers the behavior of the major runtime paths, but these supporting modules are also part of the system design:
 
-- [common/models/WeatherPacket.hpp](common/models/WeatherPacket.hpp) defines the weather payload exchanged between collectors and downstream consumers.
+- [common/models/TelemetryPacket.hpp](common/models/TelemetryPacket.hpp) defines the telemetry payload exchanged between collectors and downstream consumers.
 - [common/protocol/MessageEnvelope.hpp](common/protocol/MessageEnvelope.hpp) defines the canonical envelope, including identifiers, routing metadata, and serialization helpers.
 - [common/protocol/MessageTypes.hpp](common/protocol/MessageTypes.hpp) centralizes message type tags used by the protocol layer.
 - [common/publishing/BrokerPublisher.hpp](common/publishing/BrokerPublisher.hpp) exposes publishing behavior for broker-backed message delivery.
@@ -215,4 +215,4 @@ The `common/` tree is the shared runtime and transport layer for the whole repo.
 - [common/timescale/AsyncQueueWriter.hpp](common/timescale/AsyncQueueWriter.hpp)
 - [common/timescale/TimescaleBatchWriter.hpp](common/timescale/TimescaleBatchWriter.hpp)
 
-Last updated: May 20, 2026
+Last updated: May 23, 2026

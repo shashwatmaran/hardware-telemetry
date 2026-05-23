@@ -4,7 +4,7 @@
 #include <string>
 
 inline std::string runtimeTcpHost() {
-    if (const char* host = std::getenv("WEATHER_RTOS_HOST")) {
+    if (const char* host = std::getenv("HARDWARE_TELEMETRY_HOST")) {
         if (*host != '\0') {
             return host;
         }

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Global Weather RTOS Demo - Hierarchical Topology
-# This script launches the hierarchical weather collection system with:
+# Hardware Telemetry Demo - Hierarchical Topology
+# This script launches the hierarchical telemetry system with:
 #   - city collectors grouped into regions
 #   - regional aggregators
 #   - continent aggregators
@@ -14,8 +14,8 @@ set -e
 
 cd "$(dirname "$0")"
 
-WEATHER_RTOS_HOST="${WEATHER_RTOS_HOST:-127.0.0.1}"
-TIMESCALEDB_DSN="${TIMESCALEDB_DSN:-host=127.0.0.1 port=5432 dbname=weather_rtos user=weather_rtos password=weather_secret}"
+HARDWARE_TELEMETRY_HOST="${HARDWARE_TELEMETRY_HOST:-127.0.0.1}"
+TIMESCALEDB_DSN="${TIMESCALEDB_DSN:-host=127.0.0.1 port=5432 dbname=hardware_telemetry user=hardware_telemetry password=hardware_secret}"
 export TIMESCALEDB_DSN
 
 if [ ! -d build ]; then
@@ -24,7 +24,7 @@ if [ ! -d build ]; then
 fi
 
 echo "=========================================="
-echo "Global Weather RTOS - Hierarchical Topology Demo"
+echo "Hardware Telemetry - Hierarchical Topology Demo"
 echo "=========================================="
 echo ""
 echo "Topology:"
@@ -53,8 +53,8 @@ echo "=========================================="
 echo ""
 echo "Starting components..."
 echo ""
-echo "TCP host: $WEATHER_RTOS_HOST"
-echo "Set WEATHER_RTOS_HOST to run the topology against another machine on your LAN."
+echo "TCP host: $HARDWARE_TELEMETRY_HOST"
+echo "Set HARDWARE_TELEMETRY_HOST to run the topology against another machine on your LAN."
 echo ""
 
 # Create a repository-local logs directory (can be overridden via LOGDIR env)

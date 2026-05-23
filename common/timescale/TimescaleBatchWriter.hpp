@@ -20,7 +20,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "../models/WeatherPacket.hpp"
+#include "../models/TelemetryPacket.hpp"
 #include "../protocol/MessageEnvelope.hpp"
 #include "TimescaleDbClient.hpp"
 
@@ -29,30 +29,64 @@ using json = nlohmann::json;
 struct TimescaleRawRow {
     std::string message_id;
     std::string source;
-    std::string continent;
-    std::string country;
+    std::string node_id;
+    std::string asset_tag;
+    std::string hostname;
+    std::string site_id;
+    std::string rack_id;
     std::string region;
-    std::string city;
+    std::string geo_region;
     long event_time;
     long created_at;
-    double temperature;
-    double humidity;
-    double wind_speed;
+
+    double cpu_temp_c;
+    double cpu_util_pct;
+    double gpu_temp_c;
+    double gpu_util_pct;
+    double vram_used_mb;
+    double vram_total_mb;
+    double mem_used_mb;
+    double mem_total_mb;
+    double mem_pressure_pct;
+    double power_draw_w;
+    double fan_rpm;
+    bool thermal_throttle_active;
+    std::string thermal_throttle_reason;
+    double disk_util_pct;
+    double nvme_temp_c;
+    double net_tx_mbps;
+    double net_rx_mbps;
+    double net_latency_ms;
+    double packet_loss_pct;
+    long ecc_error_count;
+    long pcie_error_count;
+    double health_score;
+    std::string status_flags;
+    std::string source_vendor;
+    std::string source_model;
     std::string payload_json;
 };
 
 struct TimescaleAggregateRow {
     long bucket_start;
-    std::string continent;
-    std::string country;
+    std::string node_id;
+    std::string site_id;
     std::string region;
-    std::string city;
-    std::size_t observation_count;
-    double min_temperature;
-    double max_temperature;
-    double avg_temperature;
-    double avg_humidity;
-    double avg_wind_speed;
+    std::string geo_region;
+    std::size_t sample_count;
+    double min_cpu_temp_c;
+    double max_cpu_temp_c;
+    double avg_cpu_temp_c;
+    double avg_cpu_util_pct;
+    double avg_gpu_util_pct;
+    double avg_vram_used_pct;
+    double avg_mem_pressure_pct;
+    double avg_power_draw_w;
+    double avg_fan_rpm;
+    std::size_t throttle_count;
+    std::size_t alert_count;
+    double health_score_avg;
+    double health_score_min;
 };
 
 class TimescaleBatchWriter {
@@ -68,7 +102,7 @@ public:
                     timescaleDb_() {}
 
     bool submit(const MessageEnvelope& envelope) {
-        auto packet = weather_packet_from_envelope(envelope);
+        auto packet = telemetry_packet_from_envelope(envelope);
         if (!packet.has_value()) {
             std::cerr << "[TimescaleWriter] Rejected invalid envelope " << envelope.message_id << std::endl;
             return false;
@@ -152,7 +186,7 @@ private:
     }
 
     static long toEpochMs(long rawTimestamp) {
-        // WeatherPacket timestamps are already epoch-millisecond values in this pipeline.
+        // TelemetryPacket timestamps are epoch-millisecond values in this pipeline.
         return rawTimestamp;
     }
 
@@ -160,32 +194,58 @@ private:
         std::vector<TimescaleRawRow> rawRows;
         rawRows.reserve(batch.size());
 
-        std::map<std::tuple<long, std::string, std::string, std::string, std::string>, std::vector<WeatherPacket>> aggregateGroups;
+        std::map<std::tuple<long, std::string, std::string, std::string, std::string>, std::vector<TelemetryPacket>> aggregateGroups;
 
         for (const auto& envelope : batch) {
-            auto packetOpt = weather_packet_from_envelope(envelope);
+            auto packetOpt = telemetry_packet_from_envelope(envelope);
             if (!packetOpt.has_value()) {
                 continue;
             }
 
-            const WeatherPacket& packet = *packetOpt;
+            const TelemetryPacket& packet = *packetOpt;
             const long eventTime = packet.timestamp;
             rawRows.push_back({
                 envelope.message_id,
                 envelope.source,
-                packet.continent,
-                packet.country,
+                packet.node_id,
+                packet.asset_tag,
+                packet.hostname,
+                packet.site_id,
+                packet.rack_id,
                 packet.region,
-                packet.city,
+                packet.geo_region,
                 eventTime,
                 envelope.created_at,
-                packet.temperature,
-                packet.humidity,
-                packet.wind_speed,
+
+                packet.cpu_temp_c,
+                packet.cpu_util_pct,
+                packet.gpu_temp_c,
+                packet.gpu_util_pct,
+                packet.vram_used_mb,
+                packet.vram_total_mb,
+                packet.mem_used_mb,
+                packet.mem_total_mb,
+                packet.mem_pressure_pct,
+                packet.power_draw_w,
+                packet.fan_rpm,
+                packet.thermal_throttle_active,
+                packet.thermal_throttle_reason,
+                packet.disk_util_pct,
+                packet.nvme_temp_c,
+                packet.net_tx_mbps,
+                packet.net_rx_mbps,
+                packet.net_latency_ms,
+                packet.packet_loss_pct,
+                packet.ecc_error_count,
+                packet.pcie_error_count,
+                packet.health_score,
+                packet.status_flags,
+                packet.source_vendor,
+                packet.source_model,
                 envelope_to_json(envelope).dump()
             });
 
-            aggregateGroups[{minuteBucket(eventTime), packet.continent, packet.country, packet.region, packet.city}].push_back(packet);
+            aggregateGroups[{minuteBucket(eventTime), packet.node_id, packet.site_id, packet.region, packet.geo_region}].push_back(packet);
         }
 
         std::vector<TimescaleAggregateRow> aggregateRows;
@@ -197,19 +257,28 @@ private:
             if (packets.empty()) {
                 continue;
             }
-
-            double minTemp = packets.front().temperature;
-            double maxTemp = packets.front().temperature;
-            double sumTemp = 0.0;
-            double sumHumidity = 0.0;
-            double sumWind = 0.0;
+            double minCpu = packets.front().cpu_temp_c;
+            double maxCpu = packets.front().cpu_temp_c;
+            double sumCpu = 0.0;
+            double sumCpuUtil = 0.0;
+            double sumGpuUtil = 0.0;
+            double sumVramUsedPct = 0.0;
+            double sumMemPressure = 0.0;
+            double sumPower = 0.0;
+            double sumFan = 0.0;
+            double sumHealth = 0.0;
 
             for (const auto& packet : packets) {
-                minTemp = std::min(minTemp, packet.temperature);
-                maxTemp = std::max(maxTemp, packet.temperature);
-                sumTemp += packet.temperature;
-                sumHumidity += packet.humidity;
-                sumWind += packet.wind_speed;
+                minCpu = std::min(minCpu, packet.cpu_temp_c);
+                maxCpu = std::max(maxCpu, packet.cpu_temp_c);
+                sumCpu += packet.cpu_temp_c;
+                sumCpuUtil += packet.cpu_util_pct;
+                sumGpuUtil += packet.gpu_util_pct;
+                sumVramUsedPct += (packet.vram_total_mb > 0.0) ? (packet.vram_used_mb / packet.vram_total_mb * 100.0) : 0.0;
+                sumMemPressure += packet.mem_pressure_pct;
+                sumPower += packet.power_draw_w;
+                sumFan += packet.fan_rpm;
+                sumHealth += packet.health_score;
             }
 
             aggregateRows.push_back({
@@ -219,11 +288,19 @@ private:
                 std::get<3>(key),
                 std::get<4>(key),
                 packets.size(),
-                minTemp,
-                maxTemp,
-                sumTemp / static_cast<double>(packets.size()),
-                sumHumidity / static_cast<double>(packets.size()),
-                sumWind / static_cast<double>(packets.size())
+                minCpu,
+                maxCpu,
+                sumCpu / static_cast<double>(packets.size()),
+                sumCpuUtil / static_cast<double>(packets.size()),
+                sumGpuUtil / static_cast<double>(packets.size()),
+                sumVramUsedPct / static_cast<double>(packets.size()),
+                sumMemPressure / static_cast<double>(packets.size()),
+                sumPower / static_cast<double>(packets.size()),
+                sumFan / static_cast<double>(packets.size()),
+                0,
+                0,
+                sumHealth / static_cast<double>(packets.size()),
+                0.0
             });
         }
 
@@ -253,38 +330,61 @@ private:
         sql << "BEGIN;" << std::endl;
 
         for (const auto& row : rawRows) {
-            sql << "INSERT INTO weather_observations_raw "
-                << "(message_id, source, continent, country, region, city, event_time, created_at, temperature, humidity, wind_speed, payload_json) VALUES ("
+            sql << "INSERT INTO hardware_telemetry_raw "
+                << "(message_id, source, node_id, asset_tag, hostname, site_id, rack_id, region, geo_region, event_time, created_at, cpu_temp_c, cpu_util_pct, gpu_temp_c, gpu_util_pct, vram_used_mb, vram_total_mb, mem_used_mb, mem_total_mb, mem_pressure_pct, power_draw_w, fan_rpm, thermal_throttle_active, thermal_throttle_reason, disk_util_pct, nvme_temp_c, net_tx_mbps, net_rx_mbps, net_latency_ms, packet_loss_pct, ecc_error_count, pcie_error_count, health_score, status_flags, source_vendor, source_model, payload_json) VALUES ("
                 << "'" << escapeSqlLiteral(row.message_id) << "', '"
                 << escapeSqlLiteral(row.source) << "', '"
-                << escapeSqlLiteral(row.continent) << "', '"
-                << escapeSqlLiteral(row.country) << "', '"
+                << escapeSqlLiteral(row.node_id) << "', '"
+                << escapeSqlLiteral(row.asset_tag) << "', '"
+                << escapeSqlLiteral(row.hostname) << "', '"
+                << escapeSqlLiteral(row.site_id) << "', '"
+                << escapeSqlLiteral(row.rack_id) << "', '"
                 << escapeSqlLiteral(row.region) << "', '"
-                << escapeSqlLiteral(row.city) << "', to_timestamp(" << row.event_time << " / 1000.0), to_timestamp(" << row.created_at << " / 1000.0), "
-                << row.temperature << ", " << row.humidity << ", " << row.wind_speed << ", '"
+                << escapeSqlLiteral(row.geo_region) << "', to_timestamp(" << row.event_time << " / 1000.0), to_timestamp(" << row.created_at << " / 1000.0), "
+                << row.cpu_temp_c << ", " << row.cpu_util_pct << ", " << row.gpu_temp_c << ", " << row.gpu_util_pct << ", "
+                << row.vram_used_mb << ", " << row.vram_total_mb << ", " << row.mem_used_mb << ", " << row.mem_total_mb << ", "
+                << row.mem_pressure_pct << ", " << row.power_draw_w << ", " << row.fan_rpm << ", " << (row.thermal_throttle_active ? "TRUE" : "FALSE") << ", '"
+                << escapeSqlLiteral(row.thermal_throttle_reason) << "', " << row.disk_util_pct << ", " << row.nvme_temp_c << ", "
+                << row.net_tx_mbps << ", " << row.net_rx_mbps << ", " << row.net_latency_ms << ", " << row.packet_loss_pct << ", "
+                << row.ecc_error_count << ", " << row.pcie_error_count << ", " << row.health_score << ", '"
+                << escapeSqlLiteral(row.status_flags) << "', '" << escapeSqlLiteral(row.source_vendor) << "', '" << escapeSqlLiteral(row.source_model) << "', '"
                 << escapeSqlLiteral(row.payload_json) << "') ON CONFLICT (message_id) DO NOTHING;" << std::endl;
         }
 
         for (const auto& row : aggregateRows) {
-            sql << "INSERT INTO weather_city_minute_aggregates "
-                << "(bucket_start, continent, country, region, city, observation_count, min_temperature, max_temperature, avg_temperature, avg_humidity, avg_wind_speed) VALUES ("
+            sql << "INSERT INTO node_minute_aggregates "
+                << "(bucket_start, node_id, site_id, region, geo_region, sample_count, min_cpu_temp_c, max_cpu_temp_c, avg_cpu_temp_c, avg_cpu_util_pct, avg_gpu_util_pct, avg_vram_used_pct, avg_mem_pressure_pct, avg_power_draw_w, avg_fan_rpm, throttle_count, alert_count, health_score_avg, health_score_min) VALUES ("
                 << "to_timestamp(" << row.bucket_start << " / 1000.0), '"
-                << escapeSqlLiteral(row.continent) << "', '"
-                << escapeSqlLiteral(row.country) << "', '"
+                << escapeSqlLiteral(row.node_id) << "', '"
+                << escapeSqlLiteral(row.site_id) << "', '"
                 << escapeSqlLiteral(row.region) << "', '"
-                << escapeSqlLiteral(row.city) << "', "
-                << row.observation_count << ", "
-                << row.min_temperature << ", "
-                << row.max_temperature << ", "
-                << row.avg_temperature << ", "
-                << row.avg_humidity << ", "
-                << row.avg_wind_speed << ") ON CONFLICT (bucket_start, continent, country, region, city) DO UPDATE SET "
-                << "observation_count = EXCLUDED.observation_count, "
-                << "min_temperature = LEAST(weather_city_minute_aggregates.min_temperature, EXCLUDED.min_temperature), "
-                << "max_temperature = GREATEST(weather_city_minute_aggregates.max_temperature, EXCLUDED.max_temperature), "
-                << "avg_temperature = EXCLUDED.avg_temperature, "
-                << "avg_humidity = EXCLUDED.avg_humidity, "
-                << "avg_wind_speed = EXCLUDED.avg_wind_speed;" << std::endl;
+                << escapeSqlLiteral(row.geo_region) << "', "
+                << row.sample_count << ", "
+                << row.min_cpu_temp_c << ", "
+                << row.max_cpu_temp_c << ", "
+                << row.avg_cpu_temp_c << ", "
+                << row.avg_cpu_util_pct << ", "
+                << row.avg_gpu_util_pct << ", "
+                << row.avg_vram_used_pct << ", "
+                << row.avg_mem_pressure_pct << ", "
+                << row.avg_power_draw_w << ", "
+                << row.avg_fan_rpm << ", "
+                << row.throttle_count << ", "
+                << row.alert_count << ", "
+                << row.health_score_avg << ", "
+                << row.health_score_min << ") ON CONFLICT (bucket_start, node_id) DO UPDATE SET "
+                << "sample_count = EXCLUDED.sample_count, "
+                << "min_cpu_temp_c = LEAST(node_minute_aggregates.min_cpu_temp_c, EXCLUDED.min_cpu_temp_c), "
+                << "max_cpu_temp_c = GREATEST(node_minute_aggregates.max_cpu_temp_c, EXCLUDED.max_cpu_temp_c), "
+                << "avg_cpu_temp_c = EXCLUDED.avg_cpu_temp_c, "
+                << "avg_cpu_util_pct = EXCLUDED.avg_cpu_util_pct, "
+                << "avg_gpu_util_pct = EXCLUDED.avg_gpu_util_pct, "
+                << "avg_vram_used_pct = EXCLUDED.avg_vram_used_pct, "
+                << "avg_mem_pressure_pct = EXCLUDED.avg_mem_pressure_pct, "
+                << "avg_power_draw_w = EXCLUDED.avg_power_draw_w, "
+                << "avg_fan_rpm = EXCLUDED.avg_fan_rpm, "
+                << "health_score_avg = EXCLUDED.health_score_avg, "
+                << "health_score_min = EXCLUDED.health_score_min;" << std::endl;
         }
 
         sql << "COMMIT;" << std::endl;

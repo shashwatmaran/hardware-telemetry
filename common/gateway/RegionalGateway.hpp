@@ -58,8 +58,8 @@ public:
 
                     try {
                         MessageEnvelope envelope = envelope_from_json(json::parse(message));
-                        if (!is_weather_packet_envelope(envelope)) {
-                            std::cerr << "[" << gatewayName_ << "] Rejected non-weather envelope " << envelope.message_id << std::endl;
+                        if (!is_telemetry_packet_envelope(envelope)) {
+                            std::cerr << "[" << gatewayName_ << "] Rejected non-telemetry envelope " << envelope.message_id << std::endl;
                             continue;
                         }
 

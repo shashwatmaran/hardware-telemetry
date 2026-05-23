@@ -7,10 +7,11 @@
 #include <chrono>
 #include <atomic>
 #include <csignal>
+#include <cmath>
+#include <cctype>
 #include <vector>
-#include <curl/curl.h>
 #include <nlohmann/json.hpp>
-#include "../../common/models/WeatherPacket.hpp"
+#include "../../common/models/TelemetryPacket.hpp"
 #include "../../common/utils/RuntimeConfig.hpp"
 #include "../../common/protocol/MessageEnvelope.hpp"
 #include "../../common/publishing/BrokerPublisher.hpp"
@@ -19,7 +20,7 @@ using json = nlohmann::json;
 
 constexpr std::size_t MAX_QUEUE_SIZE = 100;
 
-std::queue<WeatherPacket> weatherQueue;
+std::queue<TelemetryPacket> telemetryQueue;
 std::mutex queueMutex;
 std::condition_variable queueCv;
 std::atomic<bool> running{true};
@@ -44,90 +45,107 @@ void handleShutdownSignal(int) {
     running.store(false);
 }
 
-static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
-    userp->append((char*)contents, size * nmemb);
-    return size * nmemb;
+namespace {
+
+std::string slugify(const std::string& value) {
+    std::string slug;
+    slug.reserve(value.size());
+    for (char ch : value) {
+        unsigned char uch = static_cast<unsigned char>(ch);
+        if (std::isalnum(uch)) {
+            slug.push_back(static_cast<char>(std::tolower(uch)));
+        } else if (!slug.empty() && slug.back() != '_') {
+            slug.push_back('_');
+        }
+    }
+    while (!slug.empty() && slug.back() == '_') {
+        slug.pop_back();
+    }
+    return slug.empty() ? "node" : slug;
 }
 
-json fetchWeatherData(CURL* curl, double lat, double lon) {
-    std::string readBuffer;
-    
-    if (!curl) {
-        std::cerr << "Failed to initialize CURL" << std::endl;
-        return json();
-    }
-
-    std::string url = "https://api.open-meteo.com/v1/forecast?latitude=" + std::to_string(lat) +
-                      "&longitude=" + std::to_string(lon) + "&current=temperature_2m,relative_humidity_2m,wind_speed_10m";
-
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-        std::cerr << "CURL request failed: " << curl_easy_strerror(res) << std::endl;
-        return json();
-    }
-
-    try {
-        json result = json::parse(readBuffer);
-        return result;
-    } catch (const std::exception& e) {
-        std::cerr << "JSON parse error: " << e.what() << std::endl;
-        return json();
-    }
+double wave(double phase, double scale, double offset) {
+    return offset + scale * (std::sin(phase) * 0.5 + 0.5);
 }
 
-void pollCity(const std::string& continent, const std::string& country, 
-              const std::string& region, const std::string& city, 
+TelemetryPacket buildTelemetryPacket(const std::string& continent,
+                                     const std::string& country,
+                                     const std::string& region,
+                                     const std::string& city,
+                                     double lat,
+                                     double lon,
+                                     long sampleSeq) {
+    TelemetryPacket packet;
+    const std::string citySlug = slugify(city);
+    const double phase = static_cast<double>(sampleSeq) * 0.31 + lat * 0.07 + lon * 0.03;
+    const double secondaryPhase = phase * 1.37 + static_cast<double>(citySlug.size()) * 0.19;
+
+    packet.node_id = region + ":" + citySlug;
+    packet.asset_tag = region + "-" + citySlug;
+    packet.hostname = citySlug + "." + slugify(region) + ".local";
+    packet.site_id = slugify(country);
+    packet.rack_id = "rack-" + std::to_string((sampleSeq % 12) + 1);
+    packet.region = region;
+    packet.geo_region = continent;
+    packet.sample_seq = sampleSeq;
+    packet.timestamp = epoch_millis_now();
+
+    packet.cpu_temp_c = wave(phase, 26.0, 38.0);
+    packet.cpu_util_pct = wave(secondaryPhase, 72.0, 18.0);
+    packet.gpu_temp_c = wave(phase + 1.1, 24.0, 36.0);
+    packet.gpu_util_pct = wave(secondaryPhase + 0.8, 68.0, 12.0);
+    packet.vram_total_mb = 16384.0;
+    packet.vram_used_mb = wave(phase + 0.5, 12000.0, 2000.0);
+    packet.mem_total_mb = 65536.0;
+    packet.mem_used_mb = wave(secondaryPhase + 1.2, 42000.0, 14000.0);
+    packet.mem_pressure_pct = wave(phase + 2.0, 65.0, 15.0);
+    packet.power_draw_w = wave(secondaryPhase + 2.2, 180.0, 110.0);
+    packet.fan_rpm = wave(phase + 0.9, 2200.0, 1200.0);
+    packet.thermal_throttle_active = packet.cpu_temp_c > 60.0 || packet.power_draw_w > 240.0;
+    packet.thermal_throttle_reason = packet.thermal_throttle_active ? "thermal_guard" : "";
+    packet.disk_util_pct = wave(phase + 1.7, 78.0, 8.0);
+    packet.nvme_temp_c = wave(secondaryPhase + 0.4, 26.0, 34.0);
+    packet.net_tx_mbps = wave(phase + 0.3, 260.0, 40.0);
+    packet.net_rx_mbps = wave(secondaryPhase + 0.6, 280.0, 30.0);
+    packet.net_latency_ms = wave(phase + 2.6, 16.0, 2.0);
+    packet.packet_loss_pct = wave(secondaryPhase + 1.4, 0.35, 0.02);
+    packet.ecc_error_count = static_cast<long>(std::fmod(static_cast<double>(sampleSeq) + std::fabs(lat), 3.0));
+    packet.pcie_error_count = static_cast<long>(std::fmod(static_cast<double>(sampleSeq) + std::fabs(lon), 2.0));
+    packet.health_score = std::max(0.0, 100.0 - (packet.cpu_util_pct * 0.16) - (packet.mem_pressure_pct * 0.22) - (packet.packet_loss_pct * 45.0) - (packet.thermal_throttle_active ? 14.0 : 0.0));
+    packet.status_flags = packet.thermal_throttle_active ? "thermal_throttle" : "nominal";
+    packet.source_vendor = "generic-oem";
+    packet.source_model = "edge-node-v2";
+    return packet;
+}
+
+} // namespace
+
+void pollCity(const std::string& continent, const std::string& country,
+              const std::string& region, const std::string& city,
               double lat, double lon) {
     std::cout << "[Collector] Starting poll thread for " << city << std::endl;
 
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        std::cerr << "[Collector] Failed to initialize CURL for " << city << std::endl;
-        return;
-    }
+    long sampleSeq = 0;
 
     while (running.load()) {
-        json weatherData = fetchWeatherData(curl, lat, lon);
-        if (!running.load()) {
-            break;
-        }
-        
-        if (!weatherData.empty() && weatherData.contains("current")) {
-            WeatherPacket packet;
-            packet.continent = continent;
-            packet.country = country;
-            packet.region = region;
-            packet.city = city;
-            packet.temperature = weatherData["current"]["temperature_2m"];
-            packet.humidity = weatherData["current"]["relative_humidity_2m"];
-            packet.wind_speed = weatherData["current"]["wind_speed_10m"];
-            packet.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+        TelemetryPacket packet = buildTelemetryPacket(continent, country, region, city, lat, lon, ++sampleSeq);
+        packet.payload_json = telemetry_packet_payload_json(packet);
 
-            {
-                std::unique_lock<std::mutex> lock(queueMutex);
-                while (running.load() && weatherQueue.size() >= MAX_QUEUE_SIZE) {
-                    queueCv.wait_for(lock, std::chrono::milliseconds(250));
-                }
-
-                if (!running.load()) {
-                    break;
-                }
-
-                weatherQueue.push(packet);
-                std::cout << "[Collector] Queued " << city << " - Temp: " 
-                          << packet.temperature << "°C" << std::endl;
-                lock.unlock();
-                queueCv.notify_one();
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            while (running.load() && telemetryQueue.size() >= MAX_QUEUE_SIZE) {
+                queueCv.wait_for(lock, std::chrono::milliseconds(250));
             }
-        } else {
-            std::cerr << "[Collector] Failed to fetch weather for " << city << std::endl;
+
+            if (!running.load()) {
+                break;
+            }
+
+            telemetryQueue.push(packet);
+            std::cout << "[Collector] Queued telemetry for " << city << " - CPU: "
+                      << packet.cpu_temp_c << "C" << std::endl;
+            lock.unlock();
+            queueCv.notify_one();
         }
 
         std::unique_lock<std::mutex> lock(queueMutex);
@@ -136,24 +154,17 @@ void pollCity(const std::string& continent, const std::string& country,
         });
     }
 
-    curl_easy_cleanup(curl);
 }
 
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, handleShutdownSignal);
     std::signal(SIGTERM, handleShutdownSignal);
 
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        std::cerr << "Failed to initialize libcurl" << std::endl;
-        return 1;
-    }
-
     // Load topology config
     const std::string topologyPath = resolveTopologyPath();
     std::ifstream topologyFile(topologyPath);
     if (!topologyFile.is_open()) {
         std::cerr << "Failed to open topology config" << std::endl;
-        curl_global_cleanup();
         return 1;
     }
 
@@ -177,7 +188,6 @@ int main(int argc, char* argv[]) {
 
     if (region.is_null()) {
         std::cerr << "Region '" << regionName << "' not found in topology" << std::endl;
-        curl_global_cleanup();
         return 1;
     }
 
@@ -205,10 +215,10 @@ int main(int argc, char* argv[]) {
     // Create sender thread
     threads.emplace_back([&brokerPublisher, &regionName, sendToPort]() {
         while (running.load()) {
-            WeatherPacket packet;
+            TelemetryPacket packet;
             {
                 std::unique_lock<std::mutex> lock(queueMutex);
-                while (running.load() && weatherQueue.empty()) {
+                while (running.load() && telemetryQueue.empty()) {
                     queueCv.wait_for(lock, std::chrono::milliseconds(100));
                 }
 
@@ -216,20 +226,20 @@ int main(int argc, char* argv[]) {
                     break;
                 }
 
-                if (weatherQueue.empty()) {
+                if (telemetryQueue.empty()) {
                     continue;
                 }
-                packet = weatherQueue.front();
-                weatherQueue.pop();
+                packet = telemetryQueue.front();
+                telemetryQueue.pop();
                 lock.unlock();
                 queueCv.notify_one();
             }
 
-            MessageEnvelope envelope = make_weather_packet_envelope(packet, "collector:" + regionName, regionName + "_aggregator");
+            MessageEnvelope envelope = make_telemetry_packet_envelope(packet, "collector:" + regionName, regionName + "_aggregator");
             if (!brokerPublisher->publish_to_topic(regionName + "_events", envelope)) {
-                std::cerr << "[Sender] Failed to publish packet for " << packet.city << std::endl;
+                std::cerr << "[Sender] Failed to publish packet for " << packet.node_id << std::endl;
             } else {
-                std::cout << "[Sender] Published " << packet.city << " to socket port " << sendToPort << std::endl;
+                std::cout << "[Sender] Published " << packet.node_id << " to socket port " << sendToPort << std::endl;
             }
         }
     });
@@ -239,6 +249,5 @@ int main(int argc, char* argv[]) {
         thread.join();
     }
 
-    curl_global_cleanup();
     return 0;
 }

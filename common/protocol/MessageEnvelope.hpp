@@ -7,7 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "../models/WeatherPacket.hpp"
+#include "../models/TelemetryPacket.hpp"
 #include "MessageTypes.hpp"
 
 using json = nlohmann::json;
@@ -34,7 +34,7 @@ inline std::string generate_message_id(const std::string& source) {
     return source + "-" + std::to_string(now) + "-" + std::to_string(sequence.fetch_add(1));
 }
 
-inline MessageEnvelope make_weather_packet_envelope(const WeatherPacket& packet,
+inline MessageEnvelope make_telemetry_packet_envelope(const TelemetryPacket& packet,
                                                     const std::string& source,
                                                     const std::string& route) {
     return {
@@ -42,7 +42,7 @@ inline MessageEnvelope make_weather_packet_envelope(const WeatherPacket& packet,
         generate_message_id(source),
         source,
         route,
-        MessageTypes::WeatherPacket,
+        MessageTypes::TelemetryPacket,
         epoch_millis_now(),
         to_json(packet)
     };
@@ -72,18 +72,18 @@ inline MessageEnvelope envelope_from_json(const json& data) {
     };
 }
 
-inline bool is_weather_packet_envelope(const MessageEnvelope& envelope) {
-    return envelope.schema_version == 1 && envelope.message_type == MessageTypes::WeatherPacket &&
+inline bool is_telemetry_packet_envelope(const MessageEnvelope& envelope) {
+    return envelope.schema_version == 1 && envelope.message_type == MessageTypes::TelemetryPacket &&
            envelope.payload.is_object();
 }
 
-inline std::optional<WeatherPacket> weather_packet_from_envelope(const MessageEnvelope& envelope) {
-    if (!is_weather_packet_envelope(envelope)) {
+inline std::optional<TelemetryPacket> telemetry_packet_from_envelope(const MessageEnvelope& envelope) {
+    if (!is_telemetry_packet_envelope(envelope)) {
         return std::nullopt;
     }
 
     try {
-        return weather_packet_from_json(envelope.payload);
+        return telemetry_packet_from_json(envelope.payload);
     } catch (...) {
         return std::nullopt;
     }

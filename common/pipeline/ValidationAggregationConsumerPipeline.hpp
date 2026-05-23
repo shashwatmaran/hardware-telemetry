@@ -22,14 +22,15 @@ public:
         : consumerName_(std::move(consumerName)), onSuccess_(std::move(onSuccess)) {}
 
     bool consume(const MessageEnvelope& envelope) {
-        auto packet = weather_packet_from_envelope(envelope);
+        auto packet = telemetry_packet_from_envelope(envelope);
         if (!packet.has_value()) {
-            std::cerr << "[" << consumerName_ << "] Invalid weather envelope " << envelope.message_id << std::endl;
+            std::cerr << "[" << consumerName_ << "] Invalid telemetry envelope " << envelope.message_id << std::endl;
             return false;
         }
 
         if (!validatePacket(*packet)) {
-            std::cerr << "[" << consumerName_ << "] Validation failed for " << packet->city << std::endl;
+            std::string id = !packet->node_id.empty() ? packet->node_id : packet->hostname;
+            std::cerr << "[" << consumerName_ << "] Validation failed for " << id << std::endl;
             return false;
         }
 
@@ -45,27 +46,23 @@ public:
     }
 
 private:
-    bool validatePacket(const WeatherPacket& packet) const {
-        if (packet.continent.empty() || packet.country.empty() || packet.region.empty() || packet.city.empty()) {
-            return false;
-        }
-        if (packet.temperature < -100 || packet.temperature > 100) {
-            return false;
-        }
-        if (packet.humidity < 0 || packet.humidity > 100) {
-            return false;
-        }
-        if (packet.wind_speed < 0 || packet.wind_speed > 200) {
-            return false;
-        }
+    bool validatePacket(const TelemetryPacket& packet) const {
+        if (packet.node_id.empty() && packet.hostname.empty()) return false;
+        if (packet.cpu_temp_c < -40 || packet.cpu_temp_c > 200) return false;
+        if (packet.cpu_util_pct < 0 || packet.cpu_util_pct > 100) return false;
+        if (packet.gpu_util_pct < 0 || packet.gpu_util_pct > 100) return false;
+        if (packet.mem_pressure_pct < 0 || packet.mem_pressure_pct > 100) return false;
+        if (packet.fan_rpm < 0) return false;
+        if (packet.health_score < 0 || packet.health_score > 100) return false;
         return true;
     }
 
-    void recordPacket(const WeatherPacket& packet) {
+    void recordPacket(const TelemetryPacket& packet) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++totalPackets_;
-        ++packetsByCity_[packet.city];
-        temperatureSum_ += packet.temperature;
+        std::string key = !packet.node_id.empty() ? packet.node_id : packet.hostname;
+        ++packetsBySource_[key];
+        cpuTempSum_ += packet.cpu_temp_c;
     }
 
     void logPacket(const MessageEnvelope& envelope) {
@@ -86,12 +83,13 @@ private:
         logFile << envelope_to_json(envelope).dump() << std::endl;
     }
 
-    void printSummary(const WeatherPacket& packet) {
+    void printSummary(const TelemetryPacket& packet) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const double averageTemperature = totalPackets_ > 0 ? temperatureSum_ / static_cast<double>(totalPackets_) : 0.0;
-        std::cout << "[" << consumerName_ << "] Consumed " << packet.city
+        const double averageTemperature = totalPackets_ > 0 ? cpuTempSum_ / static_cast<double>(totalPackets_) : 0.0;
+        std::string id = !packet.node_id.empty() ? packet.node_id : packet.hostname;
+        std::cout << "[" << consumerName_ << "] Consumed " << id
                   << " | total=" << totalPackets_
-                  << " | city_count=" << packetsByCity_[packet.city]
+                  << " | source_count=" << packetsBySource_[id]
                   << " | avg_temp=" << std::fixed << std::setprecision(2) << averageTemperature
                   << std::endl;
     }
@@ -99,7 +97,7 @@ private:
     std::string consumerName_;
     std::mutex mutex_;
     std::size_t totalPackets_{0};
-    std::map<std::string, std::size_t> packetsByCity_;
-    double temperatureSum_{0.0};
+    std::map<std::string, std::size_t> packetsBySource_;
+    double cpuTempSum_{0.0};
     std::function<void(const MessageEnvelope&)> onSuccess_;
 };
